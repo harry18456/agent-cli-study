@@ -576,6 +576,47 @@ Claude Code Linux init 比較：
 | isolated：`--setting-sources project,local --disable-slash-commands --strict-mcp-config --mcp-config empty --tools=` | `tools=[]`、`mcp_servers=[]`、`slash_commands=[]`、`skills=[]`、`plugins=[]`；仍有 `memory_paths.auto=/home/asus/.claude/projects/.../memory/` | 隔離 flags 可清空工具/MCP/skill/plugin surface；API auth 仍 `401` |
 | `--bare --strict-mcp-config --mcp-config empty --tools=` | `tools=[]`、`mcp_servers=[]`，但 init event 仍列出 slash commands / skills / `plugins=[figma]`；無 `memory_paths`；結果 `Not logged in · Please run /login` | `--bare` 不讀 OAuth/keychain；本機無 API key 時不可完成推理，且不應單獨視為 plugin/skill 清空證據 |
 
+Claude Code Linux file-based managed settings 補測：
+
+官方 Linux / WSL file-based managed settings 路徑是 `/etc/claude-code/managed-settings.json`。本機初始狀態無 `/etc/claude-code`；補測時暫時部署 root-owned `managed-settings.json`，測完已移除並確認 default init 恢復。
+
+測試 managed settings：
+
+```json
+{
+  "enabledPlugins": {
+    "figma@claude-plugins-official": false
+  },
+  "strictKnownMarketplaces": [],
+  "strictPluginOnlyCustomization": ["skills", "hooks", "mcp"],
+  "allowManagedMcpServersOnly": true,
+  "allowedMcpServers": [],
+  "deniedMcpServers": [
+    { "serverName": "plugin:figma:figma" }
+  ],
+  "allowManagedHooksOnly": true,
+  "allowManagedPermissionRulesOnly": true,
+  "disableAllHooks": true,
+  "disableBypassPermissionsMode": "disable",
+  "permissions": {
+    "deny": [
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(./secrets/**)",
+      "Bash(curl *)"
+    ]
+  }
+}
+```
+
+| 階段 | init event 結果 |
+|---|---|
+| 部署前 default | `mcp_servers=[plugin:figma:figma]`、`plugins=[figma]`、slash commands / skills 含 `figma:*` |
+| 部署 `/etc/claude-code/managed-settings.json` 後 default | `mcp_servers=[]`、`plugins=[]`，`figma:*` slash commands / skills 消失 |
+| 還原後 default | `mcp_servers=[plugin:figma:figma]`、`plugins=[figma]`、`figma:*` slash commands / skills 恢復 |
+
+判定：Linux file-based Claude managed settings 可被本機 `2.1.159` 載入，並可用 `enabledPlugins` / MCP policy / marketplace policy 清掉 user-installed Figma plugin surface。因本機 Claude API auth 仍是 `401`，本次只驗證 init surface，不驗證 managed `permissions.deny` 在 tool execution 階段的實際阻擋。
+
 ### 3.12 新版控制面啟用後的舊資訊處理
 
 官方規則：permission profiles 不和舊 sandbox settings 組合使用。只要任何 active config layer 出現 `sandbox_mode`、`sandbox_workspace_write`，或啟動時傳入 CLI `--sandbox`，Codex 會使用舊 sandbox settings，而不是 `default_permissions`。
@@ -2345,12 +2386,13 @@ Codex 使用專用 CODEX_HOME + --ignore-user-config + --ignore-rules + --disabl
 | Claude Code native Windows 不支援 Bash sandbox | 官方 Claude sandbox 文件明確寫 sandbox runs on macOS/Linux/WSL2，native Windows not supported |
 | Claude Code Linux isolated init flags 可清空 MCP / slash commands / skills / plugins surface | Linux 本機 `--setting-sources project,local --disable-slash-commands --strict-mcp-config --mcp-config empty --tools=` init event 顯示 `tools=[]`、`mcp_servers=[]`、`slash_commands=[]`、`skills=[]`、`plugins=[]` |
 | Claude Code Linux `--bare` 不能單獨當作 plugin/skill 清空證據 | Linux 本機 `--bare --strict-mcp-config --mcp-config empty --tools=` 因無 API key 回 `Not logged in`，且 init event 仍列出 slash commands、skills 與 `plugins=[figma]` |
+| Claude Code Linux file-based managed settings 可清掉 user-installed plugin/MCP surface | 暫時部署 `/etc/claude-code/managed-settings.json` 後，default init event 從 `mcp_servers=[plugin:figma:figma]`、`plugins=[figma]` 變成 `mcp_servers=[]`、`plugins=[]`；移除後恢復原狀 |
 
 ### 19.3 仍屬待驗證，不得當完成結論
 
 | 主題 | 目前狀態 | 需要的驗證 |
 |---|---|---|
-| Claude managed settings 實際部署 | 只做官方 schema 對齊，未寫入 `C:\Program Files\ClaudeCode\managed-settings.json` | 在受控 runner 部署後，用 `/status`、`/doctor`、`/permissions`、`/hooks`、`/mcp` 或 init event 驗證 |
+| Claude managed settings permission deny 實際 tool enforcement | Linux file-based managed settings 已驗證可影響 init surface；但本機 Claude API auth `401`，未能跑 Read/Bash tool execution 驗證 `permissions.deny` | 提供可用 Claude API/auth 後，以 managed deny rules 實測 Read/Bash tool 是否被拒 |
 | Claude managed MCP 空檔案 | 官方確認可禁 MCP，但本機未部署 system-level `managed-mcp.json` | 在受控 runner 部署後，驗證 `claude mcp list` 只顯示 managed policy 允許項或空集合 |
 | Claude plugin 完全禁用 | 已確認 marketplace 可用 `strictKnownMarketplaces` 管控，但既有 installed plugin 需逐一處理 | 用目標 runner 的 `claude plugin list` 建立 deny/disable 清單，再驗證 init event `plugins=[]` |
 | Codex Windows elevated sandbox | 本機 default/elevated backend 仍 `spawn setup refresh`；公開 issue 也有同類回報 | 後續版本或修復後重跑 `:read-only` / `:workspace` / 自訂 deny-read profile smoke test |
