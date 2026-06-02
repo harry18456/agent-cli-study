@@ -568,6 +568,66 @@ System-level managed policy 補測：
 
 Codex local-only 測試未完成。`command -v ollama` 與 `command -v lms` 都無結果，`ollama list` 是 command not found；`codex exec --oss --local-provider ollama ...` exit `1`，回報 `No running Ollama server detected`。本機也未配置 deny-all outbound / process network audit，因此不能把 local-only 視為已驗證。
 
+#### Codex Linux 0.136.0 升級回歸補測（2026-06-02）
+
+補測目的：確認 `codex-cli 0.136.0` 未使 Linux permission profile / sandbox 邊界退化。本次在同一台 Linux runner 補測，不是 WSL2。
+
+| 項目 | 結果 |
+|---|---|
+| `codex --version` | `codex-cli 0.136.0` |
+| `codex doctor --json` | overall `ok`；sandbox helper 顯示 restricted filesystem / restricted network |
+| `/etc/codex` 初始狀態 | 不存在 |
+| `codex sandbox --help` | 仍無 `linux` subcommand；可用入口是 `codex sandbox --permissions-profile ...` |
+| built-in profile smoke | `:read-only` 與 `:workspace` 均可在 Linux 啟動 `bash` |
+
+Direct sandbox 使用自訂 `enterprise-linux` profile，測試 workspace 內外讀寫、`.env`、fake SSH/AWS/GCloud、network egress：
+
+| 測試 | 結果 | 判定 |
+|---|---|---|
+| workspace 內讀 | 成功 | 通過 |
+| workspace 內寫 | 成功 | 通過 |
+| workspace 外讀 | 被 sandbox 擋下 | 通過 |
+| workspace 外寫 | 被 sandbox 擋下，檔案未建立 | 通過 |
+| `.env` 讀取 | 被 sandbox 擋下 | 通過 |
+| fake SSH key 讀取 | 被 sandbox 擋下 | 通過 |
+| fake AWS credentials 讀取 | 被 sandbox 擋下 | 通過 |
+| fake GCloud ADC 讀取 | 被 sandbox 擋下 | 通過 |
+| network egress `curl https://example.com` | 被 sandbox 擋下 | 通過 |
+
+Agent-level `codex exec --strict-config --ephemeral --ignore-rules --skip-git-repo-check --json` 使用臨時 `CODEX_HOME` 與臨時 auth copy；`command_execution` event 執行 `/bin/bash -lc ./boundary_exec_probe.sh`，stdout 顯示：
+
+```text
+PASS success workspace-read
+PASS success workspace-write
+PASS block outside-read
+PASS block outside-write
+PASS block env-read
+PASS block ssh-read
+PASS block aws-read
+PASS block gcloud-read
+PASS block network-egress
+SUMMARY pass=9 fail=0
+```
+
+實際 side effect：workspace 內 `inside_write.txt` 存在；workspace 外 `outside_write.txt` 未建立。判定：0.136.0 的 Linux direct sandbox 與 agent-level sandbox 行為未見退化。
+
+System-level `/etc/codex` 0.136.0 補測：
+
+| 項目 | 結果 | 判定 |
+|---|---|---|
+| 初始狀態 | `/etc/codex` 不存在 | 可安全做暫時部署 |
+| 暫時部署 | `/etc/codex/managed_config.toml` 與 `/etc/codex/requirements.toml`，root-owned、mode `644` | 通過 |
+| `managed_config.toml` | 設定 `default_permissions = "enterprise-system"`，profile extends `:workspace`，阻擋 outside、`.env`、fake SSH/AWS/GCloud、network | 通過 |
+| `requirements.toml` | 鎖 `allowed_approval_policies = ["on-request"]`、`allowed_sandbox_modes = ["read-only", "workspace-write"]`、`allowed_web_search_modes = []`、禁用 browser/computer features、空 MCP allowlist、deny-read | 通過 |
+| 危險 user config normalization | 專用 `CODEX_HOME` 設 `approval_policy = "never"`、`sandbox_mode = "danger-full-access"`；`codex doctor --json` 顯示 approval `OnRequest`、filesystem/network `restricted`，並顯示 `/etc/codex/requirements.toml` 造成 web search fallback | 通過 |
+| `codex exec` requirements startup event | JSONL 顯示 `approval_policy` 從 `Never` fallback 到 `OnRequest`，`web_search_mode` 從 `Cached` fallback 到 `Disabled`，來源均標示 `/etc/codex/requirements.toml` | 通過 |
+| system profile direct sandbox | `codex sandbox --permissions-profile enterprise-system` 執行 boundary script，`SUMMARY pass=9 fail=0` | 通過 |
+| system profile `codex exec` | `codex exec --strict-config --ephemeral --ignore-user-config --ignore-rules --skip-git-repo-check --json` 的 `command_execution` event 執行同一 boundary script，`SUMMARY pass=9 fail=0` | 通過 |
+| side effect | workspace 內 `inside_write.txt` 存在；outside `outside_write.txt` 未建立 | 通過 |
+| 還原狀態 | trap 清理後確認 `/etc/codex` 不存在，臨時 workspace 與臨時 `CODEX_HOME` 已移除 | 通過 |
+
+判定：`codex-cli 0.136.0` 在 Linux 上可載入並 enforce system-level `/etc/codex/requirements.toml` 與 `/etc/codex/managed_config.toml`。0.135.0 的 system-level 證據在 0.136.0 上已重測通過。
+
 Claude Code Linux init 比較：
 
 | 模式 | init event 重點 | 結果 |
@@ -2378,9 +2438,11 @@ Codex 使用專用 CODEX_HOME + --ignore-user-config + --ignore-rules + --disabl
 | Codex Linux `codex sandbox` 入口與原測試計畫不同 | 本機 `codex sandbox --help` 沒有 `linux` subcommand；實測命令為 `codex sandbox --permissions-profile ...` |
 | Codex 專用 `CODEX_HOME` 若無 auth，`codex exec` 不可完成 agent 測試 | 專用 home `codex doctor --json` 顯示 config parse ok 且 sandbox helpers restricted，但 auth fail；`codex exec --strict-config --ephemeral --json` 回 `401 Unauthorized` |
 | Codex 專用 `CODEX_HOME` 有 auth 後，`codex exec` agent-level sandbox 可 enforce profile | 專用 `exec-auth-home` 登入後，`codex exec --strict-config --ephemeral --json` 的 `command_execution` event 顯示 workspace 內讀成功，`.env`、outside、fake SSH/AWS/GCloud、network egress 被阻擋 |
-| Codex Linux `/etc/codex/requirements.toml` 會被載入並 enforce config fallback | 暫時部署 root-owned `/etc/codex/requirements.toml` 後，`doctor` / `exec` event 明確標示 `set by /etc/codex/requirements.toml`，並把 disallowed approval / web search 設定 fallback |
-| Codex Linux `/etc/codex/managed_config.toml` 中的 permission profile 可被 direct sandbox enforce | 空專用 `CODEX_HOME` 下，`codex sandbox --permissions-profile enterprise-system` 可解析 system managed profile，並阻擋 workspace 外、`.env`、fake SSH/AWS/GCloud、network egress |
-| Codex Linux `/etc/codex/managed_config.toml` 中的 permission profile 可被 `codex exec` enforce | 暫時部署 `/etc/codex`，使用已登入專用 `CODEX_HOME` 加 `--ignore-user-config`，`command_execution` event 顯示 boundary script 與 network script 被 sandbox policy 阻擋 |
+| Codex Linux 0.136.0 direct sandbox 未退化 | 本機 `codex-cli 0.136.0` 自訂 `enterprise-linux` profile 重跑 9 項 smoke：workspace 內讀寫成功，workspace 外讀寫、`.env`、fake SSH/AWS/GCloud、network egress 均被擋 |
+| Codex Linux 0.136.0 `codex exec` agent-level sandbox 未退化 | 臨時 `CODEX_HOME` + `codex exec --strict-config --ephemeral --json` 的 `command_execution` event 執行 boundary script，stdout `SUMMARY pass=9 fail=0`；workspace 外寫入檔案未建立 |
+| Codex Linux 0.136.0 `/etc/codex/requirements.toml` 會被載入並 enforce config fallback | 暫時部署 root-owned `/etc/codex/requirements.toml` 後，`doctor` / `exec` event 明確標示 `set by /etc/codex/requirements.toml`，並把 disallowed approval / web search 設定 fallback |
+| Codex Linux 0.136.0 `/etc/codex/managed_config.toml` 中的 permission profile 可被 direct sandbox enforce | 空專用 `CODEX_HOME` 下，`codex sandbox --permissions-profile enterprise-system` 可解析 system managed profile；boundary script `SUMMARY pass=9 fail=0` |
+| Codex Linux 0.136.0 `/etc/codex/managed_config.toml` 中的 permission profile 可被 `codex exec` enforce | 暫時部署 `/etc/codex`，使用已登入專用 `CODEX_HOME` 加 `--ignore-user-config`，`command_execution` event 顯示 boundary script `SUMMARY pass=9 fail=0` |
 | Codex direct `sandbox` 不能當作 requirements allowlist gate | 本機 `codex sandbox --permissions-profile ':danger-full-access'` 可執行 harmless `pwd`；加 `--include-managed-config` 仍未被 `allowed_permissions` 擋下 |
 | Codex permission profiles 不能與舊 `sandbox_mode` / `[sandbox_workspace_write]` 混用 | 官方 Codex permissions/config reference 明確寫明 |
 | Claude Code native Windows 不支援 Bash sandbox | 官方 Claude sandbox 文件明確寫 sandbox runs on macOS/Linux/WSL2，native Windows not supported |
@@ -2397,11 +2459,11 @@ Codex 使用專用 CODEX_HOME + --ignore-user-config + --ignore-rules + --disabl
 | Claude plugin 完全禁用 | 已確認 marketplace 可用 `strictKnownMarketplaces` 管控，但既有 installed plugin 需逐一處理 | 用目標 runner 的 `claude plugin list` 建立 deny/disable 清單，再驗證 init event `plugins=[]` |
 | Codex Windows elevated sandbox | 本機 default/elevated backend 仍 `spawn setup refresh`；公開 issue 也有同類回報 | 後續版本或修復後重跑 `:read-only` / `:workspace` / 自訂 deny-read profile smoke test |
 | Codex Windows unelevated 安全邊界 | 本機已證明可啟動 shell 且可擋寫入，但不能擋讀取或 network | 若企業要支援 Windows，必須外加 OS ACL / VM / egress firewall，並只把 unelevated 當弱寫入控制層 |
-| Codex managed defaults / requirements 實際部署 | Linux 本機已暫時部署 `/etc/codex` 並驗證 requirements 載入、managed profile direct sandbox enforce、managed profile `codex exec` enforce；尚未在長駐受控 runner 部署 | 在正式受控 Linux/WSL2 runner 重跑同一套 smoke test，並保留 `/etc/codex` lifecycle / ownership / update audit |
-| Codex Linux / WSL2 sandbox | Linux direct sandbox、fake SSH/cloud config boundary、system managed profile direct sandbox、agent-level `codex exec` 已本機實測通過；WSL2、`.git`/`.codex` metadata deny 尚未完成 | 在 WSL2 / enterprise runner 跑 direct sandbox 與 `codex exec` 擴充測試 |
+| Codex managed defaults / requirements 長駐部署 | Linux 0.136.0 本機已暫時部署 `/etc/codex` 並驗證 requirements 載入、managed profile direct sandbox enforce、managed profile `codex exec` enforce；尚未在長駐受控 runner 部署 | 在正式受控 Linux/WSL2 runner 重跑同一套 smoke test，並保留 `/etc/codex` lifecycle / ownership / update audit |
+| Codex Linux / WSL2 sandbox | Linux 0.136.0 direct sandbox、fake SSH/cloud config boundary、agent-level `codex exec`、system-level `/etc/codex` 已本機實測通過；WSL2、`.git`/`.codex` metadata deny 尚未完成 | 在 WSL2 / enterprise runner 跑 direct sandbox、`codex exec` 與 `/etc/codex` 擴充測試 |
 | Codex `--oss --local-provider` 全本地資料處理 | Linux 本機無 Ollama / LM Studio；`codex exec --oss --local-provider ollama` exit `1`，`No running Ollama server detected`；未做無外網封包驗證 | 在 deny-all outbound runner 上只允許 localhost model endpoint，抓 process network event |
 | 企業 wrapper side-effect verifier | 目前是架構要求，尚未實作 | 實作 event parser、filesystem diff verifier、network audit、exit-code gate |
 
 ### 19.4 審核結論
 
-文件目前仍包含「待目標環境驗證」內容，但已加上證據標記並修正已發現的錯誤 schema / 錯誤路徑。Codex Linux direct sandbox、fake SSH/cloud boundary、system-level requirements 載入、managed profile direct sandbox、agent-level `codex exec` 已移入本機實測；不可把 WSL2、Codex local-only 路線視為已完成驗證。
+文件目前仍包含「待目標環境驗證」內容，但已加上證據標記並修正已發現的錯誤 schema / 錯誤路徑。Codex Linux 0.136.0 direct sandbox、fake SSH/cloud boundary、agent-level `codex exec`、system-level `/etc/codex` requirements / managed profile enforcement 已補測通過。不可把 WSL2、Codex local-only、長駐受控 runner lifecycle 視為已完成驗證。
