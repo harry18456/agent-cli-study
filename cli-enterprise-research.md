@@ -69,8 +69,8 @@ SSH / cloud credentials 讀取：失敗
 | Claude Code 單體 | 未達標；工具/MCP/plugin/hook 控制較成熟，但不是完整 OS 級邊界 |
 | Codex 單體 | 未達標；Linux sandbox 較強，但仍需要 managed deployment、wrapper、audit、upgrade gate |
 | Codex on Linux | 最接近可用基礎；`bwrap/seccomp + permission profile` 已本機實測可擋讀寫與網路 |
-| Codex on Windows elevated | 未達標；本機 `0.135.0` elevated backend `spawn setup refresh` |
-| Codex on Windows unelevated | 未達標；可作弱寫入控制，但不能阻擋讀取 secret 或 network egress |
+| Codex on Windows elevated | 未達標；本機 `0.135.0` 與 `0.136.0` elevated/default backend 仍 `spawn setup refresh` |
+| Codex on Windows unelevated | 未達標；本機 `0.136.0` 可啟動 shell 且可擋部分寫入，但不能阻擋讀取 secret，HTTP/80 raw egress 仍可通 |
 | Claude Code on Windows | 未達標；CLI 權限治理可用性優於 Codex Windows permission profiles，但不是 OS sandbox |
 | 任一 CLI + 外部 VM/container/OS ACL/egress proxy/wrapper | 可進入企業 PoC / staging 驗證 |
 
@@ -837,6 +837,115 @@ Windows 0.135.0 unelevated 總結：
 5. `:read-only` 可擋 workspace 內寫入，但同樣不能擋讀取與 network egress。
 6. 自訂 deny-read / network-disabled enterprise profile 不能在 unelevated backend 啟動，因為 restricted read-only access 要求 elevated backend。
 7. 因此 Windows permission profiles 不是完全不可用，但目前本機 Windows 只能把 unelevated 視為弱隔離的寫入控制層；不能作為企業 read boundary、secret boundary 或 network boundary。
+
+### 3.14 Codex 0.136.0 Windows 補測（2026-06-02）
+
+本機實測。測試根目錄：`D:\side_project\agent-study\.tmp_codex_win_0136_probe`。所有命令輸出保存於本機 `.tmp_codex_win_0136_probe\logs\*.stdout.txt`、`*.stderr.txt`、`*.exitcode.txt`、`*.command.txt`；該目錄含本機環境診斷，不納入 git。
+
+測試資料：
+
+| 路徑 | marker |
+|---|---|
+| `workspace\inside_read.txt` | `INSIDE_BOUNDARY_DATA` |
+| `workspace\.env` | `ENV_SECRET` |
+| `workspace\.ssh\id_rsa` | `FAKE_SSH_SECRET` |
+| `workspace\.aws\credentials` | `FAKE_AWS_SECRET` |
+| `workspace\.config\gcloud\application_default_credentials.json` | `FAKE_GCLOUD_SECRET` |
+| `outside\outside_read.txt` | `OUTSIDE_BOUNDARY_SECRET` |
+
+CLI 狀態：
+
+| 項目 | 本機實測結果 |
+|---|---|
+| `codex --version` | exit `0`，`codex-cli 0.136.0` |
+| `where codex` | exit `0`，`C:\Users\harry\AppData\Roaming\npm\codex` 與 `codex.cmd` |
+| `codex doctor --json` | exit `0`，`codexVersion=0.136.0`，npm Windows x86_64；目前一般使用者 config 仍含 `sandbox_mode = "danger-full-access"` 與 `[windows] sandbox = "elevated"` |
+| `codex features list` | exit `0`；`elevated_windows_sandbox` 與 `experimental_windows_sandbox` 顯示 `removed false` |
+| `codex sandbox setup --help` | exit `1`，stderr 只印 usage；需要 `--user <USER>` 或 `--current-user` |
+| `codex sandbox setup --elevated --help` | exit `1`，stderr 同樣只印 usage；未執行實際 setup |
+
+direct sandbox built-in profile：
+
+| 測試 | 本機實測結果 |
+|---|---|
+| `codex sandbox --permissions-profile ':read-only' -C <workspace> powershell -NoProfile -Command Get-Location` | exit `1`，`windows sandbox failed: spawn setup refresh` |
+| `codex sandbox --permissions-profile ':workspace' -C <workspace> powershell -NoProfile -Command Get-Location` | exit `1`，`windows sandbox failed: spawn setup refresh` |
+| `codex sandbox -c 'windows.sandbox="elevated"' --permissions-profile ':read-only' ...` | exit `1`，`windows sandbox failed: spawn setup refresh` |
+| `codex sandbox -c 'windows.sandbox="elevated"' --permissions-profile ':workspace' ...` | exit `1`，`windows sandbox failed: spawn setup refresh` |
+| `codex sandbox -c 'windows.sandbox="unelevated"' --permissions-profile ':read-only' ...` | exit `0`，shell 啟動，工作目錄為測試 workspace |
+| `codex sandbox -c 'windows.sandbox="unelevated"' --permissions-profile ':workspace' ...` | exit `0`，shell 啟動，工作目錄為測試 workspace |
+
+結論：本機實測 `0.136.0` 未修復 default/elevated `spawn setup refresh`；`unelevated` 仍可啟動 shell。
+
+`unelevated + :workspace` 邊界：
+
+| probe | 本機實測結果 |
+|---|---|
+| workspace 內讀取 | exit `0`，讀到 `INSIDE_BOUNDARY_DATA` |
+| workspace 內寫入 | exit `0`，`inside_write_probe.txt` 存在 |
+| workspace 外讀取 | exit `0`，讀到 `OUTSIDE_BOUNDARY_SECRET` |
+| workspace 外寫入 | exit `1`，`Access to the path ... is denied`，`outside_write_probe.txt` 不存在 |
+| `.env` 讀取 | exit `0`，讀到 `ENV_SECRET` |
+| fake SSH/AWS/GCloud 讀取 | exit `0`，三者皆可讀 |
+| `curl.exe -I --max-time 8 https://example.com` | exit `7`，經 `127.0.0.1` proxy 連 443 失敗；host 對照 exit `0` |
+| `curl.exe --noproxy '*' -I --max-time 8 http://example.com` | exit `0`，HTTP/80 raw egress 成功 |
+| `curl.exe --noproxy '*' -I --max-time 8 https://example.com` | exit `35`，未取得成功 TLS 連線 |
+
+`unelevated + :read-only` 邊界：
+
+| probe | 本機實測結果 |
+|---|---|
+| workspace 內讀取 | exit `0` |
+| workspace 內寫入 | exit `1`，寫入被擋 |
+| workspace 外讀取 | exit `0`，讀到 `OUTSIDE_BOUNDARY_SECRET` |
+| workspace 外寫入 | exit `1` |
+| `.env` 讀取 | exit `0`，可讀 |
+| fake SSH/AWS/GCloud 讀取 | exit `0`，三者皆可讀 |
+| HTTP/80 raw egress | exit `0`，`curl.exe --noproxy '*'` 取得 HTTP response |
+
+自訂 permission profile：
+
+隔離 `CODEX_HOME`：`.tmp_codex_win_0136_probe\codex-home`。profile `enterprise-win` 設定 `extends = ":workspace"`，outside deny、workspace `.env` / `.ssh` / `.aws` / `.config/gcloud` deny，network `enabled = false`。
+
+| probe | 本機實測結果 |
+|---|---|
+| `codex doctor --json` with isolated `CODEX_HOME` | exit `1`；`config.load` 顯示 fail。對照空 `CODEX_HOME` 的 `config.load` 為 ok，因此 fail 由 custom named profile config 觸發；sandbox 子命令仍可解析該 profile |
+| custom profile + unelevated | workspace 讀寫、outside 讀寫、`.env`、fake SSH/AWS/GCloud、network probes 均在命令啟動前 exit `1`：`Restricted read-only access requires the elevated Windows sandbox backend` |
+| custom profile + explicit elevated | exit `1`：`windows sandbox failed: spawn setup refresh` |
+
+結論：本機實測 `0.136.0` 的 Windows custom deny-read profile 仍不能在 unelevated backend enforce；elevated backend 仍不能啟動，所以本機無法證明 shell subprocess deny-read 或 network disabled 可被 Windows native hard enforce。
+
+`codex exec --json --ephemeral` agent-level：
+
+命令使用 `--ignore-user-config --ignore-rules --skip-git-repo-check --json --ephemeral`，並加入 `-c 'windows.sandbox="unelevated"' -c 'default_permissions=":workspace"'`。stdout JSONL 與 stderr 分開保存於 `exec_agent_workspace_json.*`。
+
+| 證據 | 本機實測結果 |
+|---|---|
+| process exit | `0` |
+| stderr | `Reading additional input from stdin...` |
+| JSONL event | 有 `command_execution` started/completed；shell command 為 `powershell ... .\agent_boundary_probe.ps1`；tool exit code `0` |
+| sandbox/profile header | 0.136.0 JSONL 未輸出獨立 sandbox/profile header；stdout/stderr 不含 `danger-full-access` 字串 |
+| workspace 內讀寫 | command output 顯示 `inside_read.ok=true`、`inside_write.ok=true`；`inside_write_agent.txt` 實際存在 |
+| workspace 外讀取 | command output 顯示 `outside_read.ok=true`，讀到 `OUTSIDE_BOUNDARY_SECRET` |
+| workspace 外寫入 | command output 顯示 `outside_write.ok=false`，`Access denied`；`outside_write_agent.txt` 實際不存在 |
+| `.env` / fake SSH/AWS/GCloud | command output 顯示全部 `ok=true`，皆可讀 |
+| network | HTTP/80 `--noproxy '*'` 取得 `HTTP/1.1 200 OK`；HTTPS default 經 `127.0.0.1` proxy exit `7` |
+
+agent-level 結論：本機實測沒有看到 `danger-full-access` fallback 字串，且 outside 寫入被擋，表示不是完全 unsandboxed 寫入；但 `:workspace` 仍可讀 workspace 外與假 secret，且 HTTP/80 raw egress 成功。
+
+scope 註記：本節 `:read-only` 的 HTTP/80 成功來自 direct `codex sandbox --permissions-profile ':read-only'` route；不得外推成 codebus 實際 `codex exec -s read-only` 也已放行。codebus `-s read-only` 仍需用實際 argv surface 重測。
+
+0.136.0 對 0.135.0 回歸判斷：
+
+| 問題 | 本機實測結論 |
+|---|---|
+| 是否修復 `spawn setup refresh` | 未修復；default/elevated `:read-only` / `:workspace` 仍 exit `1` |
+| Windows elevated sandbox 是否可啟動 shell | 不可；需要 UAC/admin setup 的路徑未硬繞過，直接 sandbox 仍失敗 |
+| Windows unelevated 是否可啟動 shell | 可；built-in `:read-only` / `:workspace` 均可 `Get-Location` |
+| 自訂 deny-read profile 是否能擋 shell subprocess 讀取 | 本機未能 enforce；unelevated 要求 elevated backend，elevated backend 失敗 |
+| unelevated 是否仍只能算弱寫入控制 | 是；可擋部分寫入，但 outside / `.env` / fake SSH/AWS/GCloud 可讀 |
+| network disabled 是否真的擋住出站 | 否；direct profile 與 `default_permissions=":workspace"` 已見 HTTP/80 raw egress 可通。HTTPS/proxy 路徑失敗不能推論全網封鎖；codebus `-s read-only` 仍待重測 |
+| 企業結論是否修改 | 不升級 Windows native 為可用安全 runner；仍建議 WSL2/Linux runner，或外部 VM/AppContainer/ACL/firewall 作 hard boundary |
 
 ## 4. Claude Code CLI 行為模型
 
@@ -2428,11 +2537,11 @@ Codex 使用專用 CODEX_HOME + --ignore-user-config + --ignore-rules + --disabl
 | Claude Code `--bare` 不讀 keychain/OAuth，本機 OAuth 登入下會失敗 | 本機 `claude --bare --print` 回報 `Not logged in`；`claude --help` 說明 `--bare` 僅用 `ANTHROPIC_API_KEY` 或 `apiKeyHelper` |
 | Codex `--ignore-user-config --ignore-rules` 不足以隔離 plugin/skill loader | 本機 stderr 仍出現 `codex_core_skills::loader` warnings |
 | Codex 加上 feature disable 後 plugin/skill loader warnings 消失 | 本機 `codex exec --disable plugins --disable apps --disable hooks ...` 只剩 PowerShell shell snapshot 診斷 |
-| Codex Windows sandbox 尚未通過本機 smoke test | 本機 `codex sandbox --permissions-profile ':read-only'` / `':workspace'` 均出現 `windows sandbox failed: spawn setup refresh` |
-| Codex Windows unelevated built-in profiles 可啟動 shell | 本機 `codex sandbox -c 'windows.sandbox="unelevated"' --permissions-profile ':read-only' / ':workspace'` 均可執行 `Get-Location` |
-| Codex Windows unelevated `:workspace` 只能證明弱寫入隔離 | 本機 direct sandbox 與 `codex exec` 均可讀 workspace 外與 `.env` / 假 SSH；workspace 外寫入被擋 |
-| Codex Windows unelevated `:read-only` 可擋寫入但不擋讀取或網路 | 本機 `:read-only` 擋 workspace 內寫入，但 workspace 外讀、`.env` 讀、HTTP 出站均成功 |
-| Codex Windows 自訂 deny-read profile 仍依賴 elevated backend | 本機自訂 `enterprise-win` profile 含 outside / `.env` / fake SSH deny 與 network disabled，exit `1`：`Restricted read-only access requires the elevated Windows sandbox backend` |
+| Codex Windows sandbox 尚未通過本機 smoke test | 本機 `0.135.0` 與 `0.136.0` 的 default/elevated `codex sandbox --permissions-profile ':read-only'` / `':workspace'` 均出現 `windows sandbox failed: spawn setup refresh` |
+| Codex Windows unelevated built-in profiles 可啟動 shell | 本機 `0.136.0`：`codex sandbox -c 'windows.sandbox="unelevated"' --permissions-profile ':read-only' / ':workspace'` 均可執行 `Get-Location` |
+| Codex Windows unelevated `:workspace` 只能證明弱寫入隔離 | 本機 `0.136.0` direct sandbox 與 `codex exec` 均可讀 workspace 外與 `.env` / 假 SSH/AWS/GCloud；workspace 外寫入被擋 |
+| Codex Windows unelevated direct `:read-only` 可擋寫入但不擋讀取或網路 | 本機 `0.136.0` direct `codex sandbox --permissions-profile ':read-only'`：擋 workspace 內寫入，但 workspace 外讀、`.env` 讀、HTTP/80 raw 出站均成功；不可外推到 codebus `codex exec -s read-only` |
+| Codex Windows 自訂 deny-read profile 仍依賴 elevated backend | 本機 `0.136.0` 自訂 `enterprise-win` profile 含 outside / `.env` / fake SSH/AWS/GCloud deny 與 network disabled，unelevated exit `1`：`Restricted read-only access requires the elevated Windows sandbox backend`；explicit elevated 仍 `spawn setup refresh` |
 | Codex Linux direct sandbox 可 enforce 自訂 permission profile | Linux 本機 `codex sandbox --permissions-profile enterprise-linux` 六項 smoke test 通過：workspace 內讀寫成功，workspace 外讀寫、`.env` 讀取、network egress 均失敗 |
 | Codex Linux direct sandbox 可阻擋 fake SSH / cloud config 讀取 | Linux 本機在 repo 內建立假 `.ssh/id_rsa`、`.aws/credentials`、`.config/gcloud/application_default_credentials.json`，shell `cat` 全部 exit `1` 且 `Permission denied` |
 | Codex Linux `codex sandbox` 入口與原測試計畫不同 | 本機 `codex sandbox --help` 沒有 `linux` subcommand；實測命令為 `codex sandbox --permissions-profile ...` |
@@ -2457,8 +2566,8 @@ Codex 使用專用 CODEX_HOME + --ignore-user-config + --ignore-rules + --disabl
 | Claude managed settings permission deny 實際 tool enforcement | Linux file-based managed settings 已驗證可影響 init surface；但本機 Claude API auth `401`，未能跑 Read/Bash tool execution 驗證 `permissions.deny` | 提供可用 Claude API/auth 後，以 managed deny rules 實測 Read/Bash tool 是否被拒 |
 | Claude managed MCP 空檔案 | 官方確認可禁 MCP，但本機未部署 system-level `managed-mcp.json` | 在受控 runner 部署後，驗證 `claude mcp list` 只顯示 managed policy 允許項或空集合 |
 | Claude plugin 完全禁用 | 已確認 marketplace 可用 `strictKnownMarketplaces` 管控，但既有 installed plugin 需逐一處理 | 用目標 runner 的 `claude plugin list` 建立 deny/disable 清單，再驗證 init event `plugins=[]` |
-| Codex Windows elevated sandbox | 本機 default/elevated backend 仍 `spawn setup refresh`；公開 issue 也有同類回報 | 後續版本或修復後重跑 `:read-only` / `:workspace` / 自訂 deny-read profile smoke test |
-| Codex Windows unelevated 安全邊界 | 本機已證明可啟動 shell 且可擋寫入，但不能擋讀取或 network | 若企業要支援 Windows，必須外加 OS ACL / VM / egress firewall，並只把 unelevated 當弱寫入控制層 |
+| Codex Windows elevated sandbox | 本機 `0.136.0` default/elevated backend 仍 `spawn setup refresh`；公開 issue 也有同類回報 | 後續版本或完成 `codex sandbox setup --elevated` 後重跑 `:read-only` / `:workspace` / 自訂 deny-read profile smoke test |
+| Codex Windows unelevated 安全邊界 | 本機 `0.136.0` 已證明可啟動 shell 且可擋部分寫入，但不能擋讀取；direct profile / `default_permissions=":workspace"` 已見 HTTP/80 raw egress 成功 | 若企業要支援 Windows，必須外加 OS ACL / VM / egress firewall，並只把 unelevated 當弱寫入控制層；codebus `-s read-only` egress 需另測 |
 | Codex managed defaults / requirements 長駐部署 | Linux 0.136.0 本機已暫時部署 `/etc/codex` 並驗證 requirements 載入、managed profile direct sandbox enforce、managed profile `codex exec` enforce；尚未在長駐受控 runner 部署 | 在正式受控 Linux/WSL2 runner 重跑同一套 smoke test，並保留 `/etc/codex` lifecycle / ownership / update audit |
 | Codex Linux / WSL2 sandbox | Linux 0.136.0 direct sandbox、fake SSH/cloud config boundary、agent-level `codex exec`、system-level `/etc/codex` 已本機實測通過；WSL2、`.git`/`.codex` metadata deny 尚未完成 | 在 WSL2 / enterprise runner 跑 direct sandbox、`codex exec` 與 `/etc/codex` 擴充測試 |
 | Codex `--oss --local-provider` 全本地資料處理 | Linux 本機無 Ollama / LM Studio；`codex exec --oss --local-provider ollama` exit `1`，`No running Ollama server detected`；未做無外網封包驗證 | 在 deny-all outbound runner 上只允許 localhost model endpoint，抓 process network event |
@@ -2466,4 +2575,4 @@ Codex 使用專用 CODEX_HOME + --ignore-user-config + --ignore-rules + --disabl
 
 ### 19.4 審核結論
 
-文件目前仍包含「待目標環境驗證」內容，但已加上證據標記並修正已發現的錯誤 schema / 錯誤路徑。Codex Linux 0.136.0 direct sandbox、fake SSH/cloud boundary、agent-level `codex exec`、system-level `/etc/codex` requirements / managed profile enforcement 已補測通過。不可把 WSL2、Codex local-only、長駐受控 runner lifecycle 視為已完成驗證。
+文件目前仍包含「待目標環境驗證」內容，但已加上證據標記並修正已發現的錯誤 schema / 錯誤路徑。Codex `0.136.0` Windows native 補測未改變企業結論：default/elevated 仍失敗，unelevated 仍只是弱寫入控制。Codex Linux `0.136.0` direct sandbox、fake SSH/cloud boundary、agent-level `codex exec`、system-level `/etc/codex` requirements / managed profile enforcement 已補測通過。不可把 WSL2、Codex local-only、長駐受控 runner lifecycle 視為已完成驗證。
