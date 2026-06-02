@@ -38,7 +38,7 @@ codebus 不是單純「把 Claude/Codex 開在 repo root」。它是一個 wrapp
 | 面向 | Claude provider | Codex provider |
 |---|---|---|
 | codebus 內建整合成熟度 | 較高；工具 allowlist、Bash/Read PreToolUse hook、MCP/user setting 隔離較明確 | 可用；JSONL 與 sandbox 整合好，但 Windows read/network boundary 是 partial |
-| Windows native 安全邊界 | 寫入較受限；讀取不是 vault hard boundary | 讀取不受限；寫入正常 ACL 多數可擋，但 ACL-writable 目錄例外；network 擋不完整 |
+| Windows native 安全邊界 | 寫入較受限；讀取不是 vault hard boundary | `-s` 不設硬讀取邊界；PII mirror / AGENTS soft constraint 只能緩解；寫入正常 ACL 多數可擋，但 ACL-writable 目錄例外；network 擋不完整 |
 | codebus 目前防線 | `.codebus` cwd、PII mirror、tool allowlist、hooks、`--setting-sources project,local`、empty MCP | `.codebus` cwd、PII mirror、`--ignore-user-config`、feature disable、`-s` sandbox、`windows.sandbox=unelevated`、`web_search=disabled` |
 | 主要風險 | `check-read` 是 denylist，非 vault allowlist；`Glob/Grep` 未掛 hook；父 shell env 會繼承 | Windows unelevated 不能硬擋讀 user home / sibling repo；`workspace-write` 允許 HTTP/80 與 loopback |
 | 企業建議 | Windows 可作受控寫入工具；敏感讀取仍需外部 filesystem boundary 或 hook 改成 allowlist | 優先搬 Linux/WSL2 runner；Windows native 要加 AppContainer/VM/ACL/firewall |
@@ -373,7 +373,7 @@ network：
 
 ### Codex 0.136.0 Windows 對照補測
 
-本機實測。測試根目錄：`D:\side_project\agent-study\.tmp_codex_win_0136_probe`。本節使用 `codex sandbox --permissions-profile` 與 `codex exec --json --ephemeral`；不是 codebus 目前 `-s read-only|workspace-write` route 的完整替代測試。
+本機實測。測試根目錄：`D:\side_project\agent-study\.tmp_codex_win_0136_probe`。本節使用 `codex sandbox --permissions-profile` 與 `codex exec --json --ephemeral` + `default_permissions=":workspace"`；不是 codebus 目前 `codex exec ... -s read-only|workspace-write` route 的完整替代測試。尤其 `:read-only` 的 network 結果不得外推到 codebus `-s read-only`。
 
 | 項目 | 結果 |
 |---|---|
@@ -387,10 +387,10 @@ network：
 | `unelevated :workspace` 讀 `.env` / fake SSH/AWS/GCloud | 全部成功 |
 | `unelevated :read-only` workspace 內寫入 | 失敗 |
 | `unelevated :read-only` workspace 外讀取與 secret 讀取 | 成功 |
-| HTTP/80 raw egress | `curl.exe --noproxy '*' -I http://example.com` 在 `:read-only` 與 `:workspace` 均成功 |
+| HTTP/80 raw egress | `curl.exe --noproxy '*' -I http://example.com` 在 direct `codex sandbox --permissions-profile :read-only` 與 `:workspace` 均成功；待用 codebus `codex exec -s read-only` surface 重測 |
 | HTTPS/proxy egress | `curl.exe -I https://example.com` 在 sandbox 內 exit `7`，host 對照成功；不能推論全網封鎖 |
 | custom `enterprise-win` deny-read/network-disabled profile | unelevated exit `1`：`Restricted read-only access requires the elevated Windows sandbox backend`；explicit elevated 仍 `spawn setup refresh` |
-| `codex exec --json --ephemeral` + `default_permissions=":workspace"` | JSONL `command_execution` exit `0`；workspace 內寫成功，workspace 外寫失敗；workspace 外讀、`.env`、fake SSH/AWS/GCloud 讀取成功；HTTP/80 raw egress 成功 |
+| `codex exec --json --ephemeral` + `default_permissions=":workspace"` | JSONL `command_execution` exit `0`；workspace 內寫成功，正常 ACL workspace 外寫失敗；workspace 外讀、`.env`、fake SSH/AWS/GCloud 讀取成功；HTTP/80 raw egress 成功；ACL-writable 例外未在 0.136.0 重測 |
 
 0.136.0 對 codebus 結論的影響：
 
@@ -399,7 +399,8 @@ network：
 | `spawn setup refresh` | 未修復；Windows elevated native sandbox 仍不能作 codebus 企業 runner 基礎 |
 | unelevated | 可啟動 shell，但仍只能視為弱寫入控制 |
 | custom permission profile | 不能在本機 unelevated enforce deny-read；仍需 elevated backend，而 elevated backend 失敗 |
-| network | `web_search=disabled` 與 sandbox proxy 失敗不能當 egress deny；HTTP/80 raw egress 已成功 |
+| network | `web_search=disabled` 與 sandbox proxy 失敗不能當 egress deny；HTTP/80 raw egress 已在 direct profiles 與 `default_permissions=":workspace"` 成功；codebus `-s read-only` 待重測 |
+| write | 0.136.0 只重測正常 ACL workspace 外寫入失敗；`%TEMP%` / Everyone-writable / ACL-writable 例外未重測，仍沿用 0.135.0 與 `security.md` §5 作為風險 |
 | codebus 企業路線 | 不升級 Windows native Codex 為安全 runner；仍建議 WSL2/Linux runner，或外部 VM/AppContainer/ACL/firewall |
 
 ### Codex provider 優缺
@@ -617,7 +618,8 @@ Windows 判斷：
 | 證據 | 結果 |
 |---|---|
 | `claude --version` | `2.1.159 (Claude Code)` |
-| `codex --version` | `codex-cli 0.135.0` |
+| `codex --version` 原始 codebus-style 探針 | `codex-cli 0.135.0` |
+| `codex --version` Windows 補測 | `codex-cli 0.136.0` |
 | `codebus.exe --repo D:\side_project\codebus --help` | CLI 可執行 |
 | `codebus.exe --repo D:\side_project\codebus lint --format json` | `error_count=0,warn_count=0` |
 | raw Claude root default init | hooks/MCP/skills/plugins/user memory 會載入 |
@@ -639,9 +641,9 @@ Windows 判斷：
 | Codex codebus-style `-s workspace-write` normal ACL 外部寫 | blocked；`Access is denied` |
 | Codex codebus-style `-s workspace-write` `%TEMP%` 外部寫 | allowed；檔案存在且含 marker |
 | Codex 0.136.0 default/elevated direct sandbox | `:read-only` / `:workspace` 仍 `windows sandbox failed: spawn setup refresh` |
-| Codex 0.136.0 unelevated direct sandbox | built-in profiles 可啟動 shell，但 workspace 外讀、`.env`、fake SSH/AWS/GCloud、HTTP/80 raw egress 仍成功 |
+| Codex 0.136.0 unelevated direct sandbox | built-in profiles 可啟動 shell，但 workspace 外讀、`.env`、fake SSH/AWS/GCloud 成功；HTTP/80 raw egress 在 direct `:read-only` / `:workspace` 成功，不能外推到 codebus `-s read-only` |
 | Codex 0.136.0 custom deny-read profile | unelevated 要求 elevated backend；explicit elevated 仍 `spawn setup refresh` |
-| Codex 0.136.0 `exec --json --ephemeral` | JSONL tool event 顯示 workspace 內寫成功、workspace 外寫失敗，但外部讀取與 fake secret 讀取成功 |
+| Codex 0.136.0 `exec --json --ephemeral` | `default_permissions=":workspace"` 下 workspace 內寫成功、正常 ACL workspace 外寫失敗；外部讀取、fake secret 讀取、HTTP/80 raw egress 成功；非 codebus `-s read-only` 證據 |
 
 ## 待補
 
@@ -653,10 +655,12 @@ Windows 判斷：
 6. 擴充 PII scanner：GitHub PAT、GCP、Slack、JWT、PEM private key、DB URL password 等要納入企業 baseline。
 7. 修 audit：保存 child stderr 並把 stderr-only sandbox denial 納入 `sandbox_denial_count` 或獨立欄位。
 8. 補測 Windows symlink / NTFS junction live-deref 對 Codex/Claude 絕對路徑讀取的影響。
-9. 在 Windows 受控 runner 或後續 Codex 版本重測 elevated sandbox；本機 `0.136.0` 仍未修復 `spawn setup refresh`。
-9. 補測 Codex `spawn_agent` 在 codebus 真實 prompt 下的可觀測性，必要時 `--disable multi_agent`。
-10. 用專用 `CODEBUS_HOME` 跑 codebus mock provider end-to-end，確認 `.codebus` cwd、hooks、event log、changed paths。
-11. 在 Windows 受控 runner 部署 Claude managed settings，驗證 codebus wrapper 不受 user/global source 污染。
-12. 在 Windows 受控 runner 重測 Codex elevated sandbox 與新版 permission profiles，不與舊 `-s` route 混用。
-13. 在 WSL2/Linux runner 跑 codebus + Codex end-to-end，驗證 permission profile、network deny、fake SSH/AWS/GCloud 讀取。
-14. 評估 codebus Codex backend 是否要從舊 `-s` route migration 到 managed permission profile route。
+9. 用 codebus 實際 `codex exec ... -s read-only` surface 重測 0.136.0 HTTP/80、HTTPS/443、loopback，釐清 0.136 direct profile 結果是否為 profile-vs-`-s` 差異。
+10. 用 0.136.0 重測 `%TEMP%` / Everyone-writable / ACL-writable workspace 外寫入例外。
+11. 在 Windows 受控 runner 或後續 Codex 版本重測 elevated sandbox；本機 `0.136.0` 仍未修復 `spawn setup refresh`。
+12. 補測 Codex `spawn_agent` 在 codebus 真實 prompt 下的可觀測性，必要時 `--disable multi_agent`。
+13. 用專用 `CODEBUS_HOME` 跑 codebus mock provider end-to-end，確認 `.codebus` cwd、hooks、event log、changed paths。
+14. 在 Windows 受控 runner 部署 Claude managed settings，驗證 codebus wrapper 不受 user/global source 污染。
+15. 若 Windows elevated backend 修復，重測 Codex 新版 permission profiles，不與舊 `-s` route 混用。
+16. 在 WSL2/Linux runner 跑 codebus + Codex end-to-end，驗證 permission profile、network deny、fake SSH/AWS/GCloud 讀取。
+17. 評估 codebus Codex backend 是否要從舊 `-s` route migration 到 managed permission profile route。
