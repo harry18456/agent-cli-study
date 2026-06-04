@@ -1,8 +1,8 @@
 # codebus Windows CLI 研究
 
-日期：2026-06-01；安全修訂：2026-06-02
+日期：2026-06-01；安全修訂：2026-06-02；Claude Code `2.1.162` 補測：2026-06-04
 目標路徑：`D:\side_project\codebus`
-CLI 版本：Claude Code `2.1.159`，OpenAI Codex CLI 原始測試 `0.135.0`；Windows 補測 `codex-cli 0.136.0`
+CLI 版本：Claude Code 原始 Windows 測試 `2.1.159`；Linux 升級補測 `2.1.162`；OpenAI Codex CLI 原始測試 `0.135.0`；Windows 補測 `codex-cli 0.136.0`
 
 ## 範圍修正
 
@@ -132,6 +132,7 @@ codebus 的 Claude backend 會組出以下核心 argv：
 | 已擋項目 | image/binary extension、`*id_rsa*`、`*.pem`、`*.key`、`~/.ssh/`、`~/.aws/`、`~/.gnupg/`、`~/.config/gh/` |
 | 未擋項目 | repo 外 source 絕對路徑、母 repo 原始檔、`~/.kube/`、`~/.docker/config.json`、家目錄 `.env`、其他未列入 denylist 的憑證 |
 | hook 覆蓋 | `.codebus/.claude/settings.json` 只 match `Bash` 與 `Read`；`Glob/Grep` 不經 `check-read` |
+| Claude `2.1.162` 變更 | `--tools=Grep,Glob` 在 native builds 已確認會成為 active tools；若 codebus read-only verbs 給 `Read,Glob,Grep`，`Glob/Grep` 必須視為真實讀取面 |
 | Windows native 讀取結論 | Claude Code native Windows 無 OS filesystem sandbox；headless `-p` 下讀取工具不會經互動批准，因此讀取不能宣稱 confine 在 vault |
 
 寫入邊界修訂：
@@ -145,6 +146,20 @@ codebus 的 Claude backend 會組出以下核心 argv：
 | Windows native 寫入結論 | Claude path 對 source repo 寫入相對受限；風險重點應放在讀取外洩與 vault 內可寫 |
 
 注意：codebus 的 Claude spawn 不應簡單加 `--disable-slash-commands`，因為它需要 vault 內的 codebus skills/slash workflow。`--disable-slash-commands` 適合 raw Claude root-session 隔離測試，不適合 codebus wrapper 自己的 agent run。
+
+### Claude Code 2.1.162 對 codebus 的影響
+
+2026-06-04 在 Linux runner 以 Claude Code `2.1.162` 補測：
+
+| 測試 | 結果 | 對 codebus 的判讀 |
+|---|---|---|
+| `claude --version` | `2.1.162 (Claude Code)` | 報告不能只停在 `2.1.159` |
+| `--tools=Grep,Glob` + isolated flags | init event 顯示 `tools=["Glob","Grep"]` | `Glob/Grep` 已是 active search tools；codebus hook 只 match `Read` 時仍有 search-read surface |
+| default `--tools=` | `tools=[]`，但 user MCP/plugin/slash/skills/memory surface 仍載入 | codebus 的 `--setting-sources project,local` 與 strict empty MCP 仍必要 |
+| isolated flags + `--tools=` | `tools=[]`、`mcp_servers=[]`、`slash_commands=[]`、`skills=[]`、`plugins=[]` | 原 isolated raw-session 結論仍成立 |
+| `--settings '{"permissions":{"deny":["Read(./.env)"]}}'` + `--tools=Read` | `Read` tool_use 被 CLI permission settings 擋下，tool_result 為 denied，final `BLOCKED` | Claude permission deny 可擋 Read tool execution；但 codebus 目前主要靠 PreToolUse hook denylist，不等同 managed allowlist |
+
+官方 `2.1.162` changelog 另修正 Windows permission rules 對反斜線與大小寫變體不 match，以及 denied files 仍出現在 `Glob` / `Grep` results 的問題。這是 Windows 報告必須補測的好消息，但目前只屬官方確認；本機沒有在 Windows native `2.1.162` 下重跑 codebus probe，不能改成「已修復」。尤其 codebus 的 `check-read` 是 hook denylist，不是 Claude managed `Read` deny rule，不能直接假設官方 `Read` deny fix 會補上 codebus hook 對 `Glob/Grep` 的空洞。
 
 ### 根目錄 raw Claude 實測
 
@@ -226,7 +241,7 @@ claude --print "Reply exactly CODEBUS_ROOT_CLAUDE_ISOLATED_OK" `
 | native Windows hard sandbox 不成立 | Claude 官方 sandbox 支援 macOS/Linux/WSL2；native Windows 不應當 hard boundary |
 | raw root session 風險高 | 不經 codebus wrapper 時 user/global surface 會載入 |
 | Read hook 不是 allowlist | 絕對路徑讀取可到 vault 外；denylist 未涵蓋 `.kube`、`.docker`、`.env` 等 |
-| `Glob/Grep` 沒有 hook | `settings.rs` 預設 PreToolUse 只 match `Bash` 與 `Read` |
+| `Glob/Grep` 沒有 hook | `settings.rs` 預設 PreToolUse 只 match `Bash` 與 `Read`；Claude `2.1.162` 已確認 `--tools=Grep,Glob` 會啟用 active search tools |
 | 讀取邊界仍需外部層 | 讀取能力本身不能替代 OS deny |
 | hook 是 CLI 層 gate | 若 CLI/hook 路徑失效，不是 kernel-enforced boundary |
 
@@ -591,6 +606,7 @@ Windows 判斷：
 | Claude Code settings / managed policy | <https://code.claude.com/docs/en/settings> |
 | Claude Code sandbox platform support | <https://code.claude.com/docs/en/sandboxing> |
 | Claude Code CLI reference | <https://docs.anthropic.com/en/docs/claude-code/cli-reference> |
+| Claude Code changelog | <https://code.claude.com/docs/en/changelog> |
 | OpenAI Codex Windows sandbox design | <https://openai.com/index/building-codex-windows-sandbox/> |
 | OpenAI Codex CLI | <https://developers.openai.com/codex/cli> |
 | OpenAI Codex permissions | <https://developers.openai.com/codex/permissions> |
@@ -617,13 +633,15 @@ Windows 判斷：
 
 | 證據 | 結果 |
 |---|---|
-| `claude --version` | `2.1.159 (Claude Code)` |
+| `claude --version` | 原始 Windows 測試 `2.1.159 (Claude Code)`；2026-06-04 Linux 補測 `2.1.162 (Claude Code)` |
 | `codex --version` 原始 codebus-style 探針 | `codex-cli 0.135.0` |
 | `codex --version` Windows 補測 | `codex-cli 0.136.0` |
 | `codebus.exe --repo D:\side_project\codebus --help` | CLI 可執行 |
 | `codebus.exe --repo D:\side_project\codebus lint --format json` | `error_count=0,warn_count=0` |
 | raw Claude root default init | hooks/MCP/skills/plugins/user memory 會載入 |
 | raw Claude root isolated init | tools/MCP/slash/skills/plugins/hook 清為 0 |
+| Claude `2.1.162` `--tools=Grep,Glob` | Linux init event 顯示 `tools=["Glob","Grep"]`；search tools 已是 active surface |
+| Claude `2.1.162` `permissions.deny` Read smoke | `Read(./.env)` deny rule 擋下 Read tool_use，tool_result 回 denied，final `BLOCKED` |
 | codebus `check-read` probe | `~/.kube/config`、`~/.docker/config.json`、`~/.env`、母 repo `Cargo.toml` 允許；`~/.ssh/config`、`*.pem` 擋下 |
 | Claude PreToolUse matcher | `.codebus/.claude/settings.json` 只有 `Bash`、`Read`；無 `Glob/Grep` |
 | codebus env inheritance probe | mock Claude child 看得到父 shell `GITHUB_TOKEN` 與 `AWS_ACCESS_KEY_ID` |
@@ -664,3 +682,4 @@ Windows 判斷：
 15. 若 Windows elevated backend 修復，重測 Codex 新版 permission profiles，不與舊 `-s` route 混用。
 16. 在 WSL2/Linux runner 跑 codebus + Codex end-to-end，驗證 permission profile、network deny、fake SSH/AWS/GCloud 讀取。
 17. 評估 codebus Codex backend 是否要從舊 `-s` route migration 到 managed permission profile route。
+18. 用 Windows native Claude Code `2.1.162` 重跑 codebus `Read` deny / `Glob` / `Grep` / path case/backslash probe，確認官方修正是否能降低 Windows leakage；在驗證前不得把 `Glob/Grep` 視為已受 `check-read` 保護。

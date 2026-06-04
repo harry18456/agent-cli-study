@@ -1,6 +1,6 @@
 # Claude Code CLI 與 Codex CLI 企業內部承載研究
 
-研究日期：2026-06-01  
+研究日期：2026-06-01；Claude Code `2.1.162` 升級補測：2026-06-04
 工作區：`D:\side_project\agent-study`  
 原則：本文件以本機 CLI 實測為主，官方文件為輔。若本機版本與文件不一致，以本機版本作為直接承載應用時的決策依據。
 
@@ -87,7 +87,7 @@ CLI 內建 policy 只能作一層控制。
 | 項目 | Claude Code CLI | Codex CLI |
 |---|---:|---:|
 | 指令 | `claude.exe` | `codex.ps1` / native `codex.exe` |
-| 版本 | `2.1.159 (Claude Code)` | `codex-cli 0.135.0` |
+| 版本 | 原始測試 `2.1.159 (Claude Code)`；Linux 升級補測 `2.1.162 (Claude Code)` | `codex-cli 0.135.0` |
 | 安裝來源 | `%USERPROFILE%\.local\bin\claude.exe` | npm package `@openai/codex` |
 | 本機 auth | 已登入 claude.ai，帳號資訊已省略 | 已登入 ChatGPT |
 | 本機 user config 狀態 | `~/.claude/settings.json` 存在，含 hooks、plugins、model、permission 設定 | `~/.codex/config.toml` 存在，含 model、approval、sandbox、MCP、plugins 設定 |
@@ -101,7 +101,7 @@ CLI 內建 policy 只能作一層控制。
 
 | 驗證命令 | 結果 |
 |---|---|
-| `claude --version` | exit `0`，輸出 `2.1.159 (Claude Code)` |
+| `claude --version` | 原始測試 exit `0`，輸出 `2.1.159 (Claude Code)`；2026-06-04 Linux 補測 exit `0`，輸出 `2.1.162 (Claude Code)` |
 | `claude --help` | 預設互動 session；`-p/--print` 才是非互動輸出 |
 | `codex --version` | exit `0`，輸出 `codex-cli 0.135.0` |
 | `codex --help` | 無 subcommand 時進互動 CLI；`codex exec` 是非互動模式 |
@@ -511,7 +511,7 @@ codex exec \
 | distro / kernel | Ubuntu 22.04.5 LTS，kernel `6.8.0-111-generic` |
 | `bwrap` | `/usr/bin/bwrap` |
 | Codex | `codex-cli 0.135.0`，standalone linux-x86_64 |
-| Claude Code | `2.1.159 (Claude Code)` |
+| Claude Code | 原始 Linux 補測 `2.1.159 (Claude Code)`；2026-06-04 升級補測 `2.1.162 (Claude Code)` |
 | Codex MCP | `codex mcp list --json` 輸出 `[]` |
 | Claude MCP / plugin | `claude mcp list` 顯示 `plugin:figma:figma` connected；`claude plugin list` 顯示 user scope `figma@claude-plugins-official` enabled |
 
@@ -675,9 +675,63 @@ Claude Code Linux file-based managed settings 補測：
 | 部署 `/etc/claude-code/managed-settings.json` 後 default | `mcp_servers=[]`、`plugins=[]`，`figma:*` slash commands / skills 消失 |
 | 還原後 default | `mcp_servers=[plugin:figma:figma]`、`plugins=[figma]`、`figma:*` slash commands / skills 恢復 |
 
-判定：Linux file-based Claude managed settings 可被本機 `2.1.159` 載入，並可用 `enabledPlugins` / MCP policy / marketplace policy 清掉 user-installed Figma plugin surface。因本機 Claude API auth 仍是 `401`，本次只驗證 init surface，不驗證 managed `permissions.deny` 在 tool execution 階段的實際阻擋。
+判定：Linux file-based Claude managed settings 可被本機 `2.1.159` 載入，並可用 `enabledPlugins` / MCP policy / marketplace policy 清掉 user-installed Figma plugin surface。該次補測時 Claude API auth 為 `401`，所以只驗證 init surface，未驗證 managed `permissions.deny` 在 tool execution 階段的實際阻擋。2026-06-04 補測時本機已升級到 `2.1.162`，但目前帳號沒有免密 sudo，未能重做 `/etc/claude-code/managed-settings.json` 系統層部署；因此此 managed deployment 證據仍標記為 `2.1.159`。`2.1.162` 另以非 managed `--settings` 完成 `Read(./.env)` deny tool execution smoke，詳見 3.12。
 
-### 3.12 新版控制面啟用後的舊資訊處理
+### 3.12 Claude Code 2.1.162 升級補測（2026-06-04）
+
+補測目的：確認 Claude Code 從 `2.1.159` 升到 `2.1.162` 後，報告中的隔離、tool surface、plugin/MCP 污染與 wrapper 建議是否需要修正。本次補測在 Linux runner 執行，不是 Windows；Windows-specific permission-rule 修正只能標記為官方確認，仍需在 Windows 受控 runner 重跑。
+
+版本與來源：
+
+| 項目 | 結果 |
+|---|---|
+| `claude --version` | `2.1.162 (Claude Code)` |
+| npm `@anthropic-ai/claude-code` | `latest=2.1.162`、`next=2.1.162`、`stable=2.1.152` |
+| npm publish time | `2.1.162` published `2026-06-03T18:09:44.344Z` |
+| 官方 changelog 範圍 | `2.1.160`、`2.1.161`、`2.1.162` |
+
+官方 changelog 中與企業承載相關的更新：
+
+| 版本 | 企業影響 |
+|---|---|
+| `2.1.160` | `acceptEdits` 寫 startup files / build configs 前會 prompt；這是 CLI permission layer 改善，不是 OS filesystem boundary |
+| `2.1.160` | Figma plugin 增加 allow/block prompting；plugin permission 仍需 managed policy 與 init event 驗證 |
+| `2.1.161` | `claude mcp` 相關指令修正 secret redaction；MCP 診斷輸出仍應當成可能含敏感資訊處理 |
+| `2.1.162` | 修正 Windows permission rules 對反斜線與大小寫變體不 match 的問題；Windows 報告需在新版重測 `Read` deny 規則 |
+| `2.1.162` | 修正 denied files 仍出現在 `Glob` / `Grep` 結果的問題；但 codebus 的 `check-read` hook 不是 Claude managed `Read` deny rule，不可直接套用 |
+| `2.1.162` | `--tools` 明列 `Grep` / `Glob` 在 native builds 不再被忽略；wrapper 若把 search tools 放入 toolset，必須把它們視為真實讀取面 |
+| `2.1.162` | 修正 `WebFetch` 對預先核准 domain 的 deny 規則；若企業 wrapper 允許 `WebFetch`，需補 WebFetch deny/allow smoke |
+| `2.1.162` | `claude agents --json` 支援 scripting 並增加 `waitingFor`；本機命令輸出 `[]`，可作背景 agent 狀態檢查入口 |
+
+本機 smoke test：
+
+| 測試 | 結果 | 判定 |
+|---|---|---|
+| `claude auth status` | 已登入 claude.ai subscription；帳號資訊不記錄於報告 | 可執行低成本 print-mode smoke |
+| `claude --help` | 顯示 `--agents`、`--agent`、`--bare`、`--allow-dangerously-skip-permissions`、`--tools`、`agents` subcommand 等新版 surface | wrapper allowlist / help diff 需更新 |
+| `claude agents --json` | exit `0`，stdout `[]` | 可 script 化檢查背景 agent；目前沒有 running agent |
+| `claude plugin list` | user scope `figma@claude-plugins-official` enabled | user plugin 污染面仍存在 |
+| `claude mcp list` | claude.ai Drive/Gmail/Calendar connectors 顯示 needs-auth，`plugin:figma:figma` connected | 預設 MCP/plugin surface 仍存在 |
+| default `--tools=` stream-json init | `tools=[]`，但 `mcp_servers` 含 4 個 claude.ai connector，`plugins=[figma]`，slash commands / skills 非空，`memory_paths.auto` 指向 `~/.claude/projects/...` | 原「只清 tools 不等於隔離 user/global」結論保留 |
+| isolated flags + `--tools=` stream-json init | `tools=[]`、`mcp_servers=[]`、`slash_commands=[]`、`skills=[]`、`plugins=[]`；仍有 `memory_paths.auto` | 原 isolated flags 結論保留，但仍需處理 state/memory path |
+| `--tools=Grep,Glob` isolated init | init event 顯示 `tools=["Glob","Grep"]` | `Grep` / `Glob` 已是實際 tool surface，不可當成被忽略 |
+| `--settings '{"permissions":{"deny":["Read(./.env)"]}}'` + `--tools=Read` | 模型發出 `Read` tool_use 讀 `/tmp/claude_2162_deny_probe/.env`；tool_result 回 `File is in a directory that is denied by your permission settings.`；final `BLOCKED` | `2.1.162` 的 settings `permissions.deny` 可在 Read tool execution 階段生效 |
+| `--bare --strict-mcp-config --mcp-config '{"mcpServers":{}}' --tools=` | `mcp_servers=[]` 且無 `memory_paths`；但 slash commands / skills 非空、`plugins=[figma]`，結果 `Not logged in · Please run /login` | `--bare` 仍不能單獨當作 plugin/skill 清空證據 |
+
+注意：以上 print-mode smoke 以低 `--max-budget-usd` 執行，因此 result event 可能是 `error_max_budget_usd`；本節採用的證據是 `system/init` event、exit/stdout 與實際命令輸出，不以 final text 或 result success 作判定。
+
+報告修正結論：
+
+1. 保留「Claude Code 單體不是完整企業安全邊界」結論。
+2. 保留「`--tools=` 只清 tool list，不會清 user MCP/plugin/skill/hook surface」結論。
+3. 保留「isolated flags 可清空工具/MCP/skill/plugin surface，但 memory/state path 仍需管理」結論。
+4. 新增 `2.1.162` 風險：`Grep` / `Glob` 若被列入 `--tools`，已確認會成為 active tools；hook / managed deny / wrapper verifier 必須把 search tools 納入讀取邊界。
+5. 新增 Windows 待測：官方已修 Windows path matching 與 denied file leakage 到 `Glob` / `Grep` results；舊 Windows 結論需在 `2.1.162` 重新跑，但在完成前不得外推為已修復 codebus 的 `check-read` denylist。
+6. 新增 `2.1.162` 驗證：非 managed 的 `--settings` deny rule 可阻擋 `Read` tool execution；但這不能取代 system-level managed settings deployment 驗證。
+7. `--bare` 文件說明已更清楚：它跳過 hooks、LSP、plugin sync、attribution、auto-memory、background prefetches、keychain reads 與 CLAUDE.md auto-discovery，但 skills 仍可解析，auth 僅用 `ANTHROPIC_API_KEY` 或 `apiKeyHelper`。本機結果符合「不讀 OAuth/keychain」與「不能單獨清空 skills/plugins」的風險標記。
+8. 因本機無免密 sudo，未能用 `2.1.162` 重跑 `/etc/claude-code/managed-settings.json` 部署；`2.1.159` 的 managed settings init surface 證據保留，但不升級標記。
+
+### 3.13 新版控制面啟用後的舊資訊處理
 
 官方規則：permission profiles 不和舊 sandbox settings 組合使用。只要任何 active config layer 出現 `sandbox_mode`、`sandbox_workspace_write`，或啟動時傳入 CLI `--sandbox`，Codex 會使用舊 sandbox settings，而不是 `default_permissions`。
 
@@ -740,7 +794,7 @@ codex exec --strict-config --ephemeral -C "$WORKSPACE" \
 5. `codex exec` header 不得顯示 `danger-full-access`。
 6. smoke test 證明 `default_permissions` 的 profile 實際生效。
 
-### 3.13 Windows unelevated sandbox 補測（2026-06-01）
+### 3.14 Windows unelevated sandbox 補測（2026-06-01）
 
 補測目的：確認 Windows permission profiles 是測試方式錯誤、elevated backend 不可用，還是整個 Windows path 都不可用。
 
@@ -838,7 +892,7 @@ Windows 0.135.0 unelevated 總結：
 6. 自訂 deny-read / network-disabled enterprise profile 不能在 unelevated backend 啟動，因為 restricted read-only access 要求 elevated backend。
 7. 因此 Windows permission profiles 不是完全不可用，但目前本機 Windows 只能把 unelevated 視為弱隔離的寫入控制層；不能作為企業 read boundary、secret boundary 或 network boundary。
 
-### 3.14 Codex 0.136.0 Windows 補測（2026-06-02）
+### 3.15 Codex 0.136.0 Windows 補測（2026-06-02）
 
 本機實測。測試根目錄：`D:\side_project\agent-study\.tmp_codex_win_0136_probe`。所有命令輸出保存於本機 `.tmp_codex_win_0136_probe\logs\*.stdout.txt`、`*.stderr.txt`、`*.exitcode.txt`、`*.command.txt`；該目錄含本機環境診斷，不納入 git。
 
@@ -1912,6 +1966,7 @@ codex "do task"
 3. 使用 managed settings 鎖住 bypass、MCP、hooks、permissions。
 4. 若要 minimal mode，處理 `--bare` 的 API key/key helper 認證。
 5. 永遠驗證 tool events 與檔案結果。
+6. 若允許 `Grep` / `Glob` / `WebFetch` 等讀取或外部資料工具，必須納入 permission deny、hook 或 wrapper verifier；`2.1.162` 已確認 `--tools=Grep,Glob` 會啟用真實 tool surface。
 
 ### 14.2 Codex CLI
 
@@ -1959,6 +2014,8 @@ Claude Code：
 13. MCP：<https://code.claude.com/docs/en/mcp>
 14. `.claude` directory / `CLAUDE_CONFIG_DIR`：<https://code.claude.com/docs/en/claude-directory>
 15. Debug configuration：<https://code.claude.com/docs/en/debug-your-config>
+16. Changelog：<https://code.claude.com/docs/en/changelog>
+17. npm package metadata：<https://www.npmjs.com/package/@anthropic-ai/claude-code>
 
 Codex：
 
@@ -2555,6 +2612,10 @@ Codex 使用專用 CODEX_HOME + --ignore-user-config + --ignore-rules + --disabl
 | Codex direct `sandbox` 不能當作 requirements allowlist gate | 本機 `codex sandbox --permissions-profile ':danger-full-access'` 可執行 harmless `pwd`；加 `--include-managed-config` 仍未被 `allowed_permissions` 擋下 |
 | Codex permission profiles 不能與舊 `sandbox_mode` / `[sandbox_workspace_write]` 混用 | 官方 Codex permissions/config reference 明確寫明 |
 | Claude Code native Windows 不支援 Bash sandbox | 官方 Claude sandbox 文件明確寫 sandbox runs on macOS/Linux/WSL2，native Windows not supported |
+| Claude Code 2.1.162 `--tools=Grep,Glob` 會啟用 search tools | Linux 本機 `claude --print --verbose --output-format stream-json --setting-sources project,local --disable-slash-commands --strict-mcp-config --mcp-config '{"mcpServers":{}}' --tools=Grep,Glob ...` 的 init event 顯示 `tools=["Glob","Grep"]` |
+| Claude Code 2.1.162 default `--tools=` 仍會載入 user/global MCP / plugin / slash / skills surface | Linux 本機 default init event 顯示 `tools=[]`，但 claude.ai connector、`plugins=[figma]`、slash commands、skills 與 auto memory path 仍存在 |
+| Claude Code 2.1.162 isolated flags 仍可清空 MCP / slash commands / skills / plugins surface | Linux 本機 `--setting-sources project,local --disable-slash-commands --strict-mcp-config --mcp-config '{"mcpServers":{}}' --tools=` init event 顯示 `tools=[]`、`mcp_servers=[]`、`slash_commands=[]`、`skills=[]`、`plugins=[]` |
+| Claude Code 2.1.162 settings `permissions.deny` 可阻擋 Read tool execution | Linux `/tmp` 測試 workspace 中，`--settings '{"permissions":{"deny":["Read(./.env)"]}}' --tools=Read --allowedTools=Read --permission-mode dontAsk` 下，模型發出 `Read` tool_use 讀 `.env`，tool_result 回 `File is in a directory that is denied by your permission settings.`，final `BLOCKED` |
 | Claude Code Linux isolated init flags 可清空 MCP / slash commands / skills / plugins surface | Linux 本機 `--setting-sources project,local --disable-slash-commands --strict-mcp-config --mcp-config empty --tools=` init event 顯示 `tools=[]`、`mcp_servers=[]`、`slash_commands=[]`、`skills=[]`、`plugins=[]` |
 | Claude Code Linux `--bare` 不能單獨當作 plugin/skill 清空證據 | Linux 本機 `--bare --strict-mcp-config --mcp-config empty --tools=` 因無 API key 回 `Not logged in`，且 init event 仍列出 slash commands、skills 與 `plugins=[figma]` |
 | Claude Code Linux file-based managed settings 可清掉 user-installed plugin/MCP surface | 暫時部署 `/etc/claude-code/managed-settings.json` 後，default init event 從 `mcp_servers=[plugin:figma:figma]`、`plugins=[figma]` 變成 `mcp_servers=[]`、`plugins=[]`；移除後恢復原狀 |
@@ -2563,7 +2624,10 @@ Codex 使用專用 CODEX_HOME + --ignore-user-config + --ignore-rules + --disabl
 
 | 主題 | 目前狀態 | 需要的驗證 |
 |---|---|---|
-| Claude managed settings permission deny 實際 tool enforcement | Linux file-based managed settings 已驗證可影響 init surface；但本機 Claude API auth `401`，未能跑 Read/Bash tool execution 驗證 `permissions.deny` | 提供可用 Claude API/auth 後，以 managed deny rules 實測 Read/Bash tool 是否被拒 |
+| Claude managed settings permission deny 實際 tool enforcement | `2.1.162` 已用 `--settings` 驗證 `Read(./.env)` deny 可阻擋 Read tool execution；但 system-level managed settings 的 `permissions.deny` 尚未部署重跑，Bash deny 也未補測 | 在可 sudo 的 Linux/WSL2 runner 或 Windows managed path 上部署 managed settings，以 managed deny rules 實測 Read/Bash tool 是否被拒 |
+| Claude Code 2.1.162 file-based managed settings 回歸 | `2.1.159` 已驗證 Linux `/etc/claude-code/managed-settings.json` 會影響 init surface；2026-06-04 本機無免密 sudo，未能用 `2.1.162` 重跑 system-level deployment | 在可 sudo 的 Linux/WSL2 runner 上重跑 default init 前後比較，確認 `mcp_servers=[]`、`plugins=[]`、Figma slash/skills 消失 |
+| Claude Code 2.1.162 Windows path matching / denied Glob/Grep leakage fix | 官方 changelog 說明已修 Windows permission rules 反斜線與大小寫 match，以及 denied files 出現在 `Glob` / `Grep` results 的問題；本機補測在 Linux，不能驗證 Windows native | 在 Windows 受控 runner 用 `2.1.162` 重跑 Read deny、backslash/case variant、Glob/Grep denied-result leakage 與 codebus `check-read` hook bypass 測試 |
+| Claude Code 2.1.162 WebFetch deny preapproved domain fix | 官方 changelog 說明已修；本機未允許 WebFetch 或執行 WebFetch tool smoke | 若企業 wrapper 允許 `WebFetch`，用 managed deny/allow rule 驗證 preapproved domain 也會被 deny |
 | Claude managed MCP 空檔案 | 官方確認可禁 MCP，但本機未部署 system-level `managed-mcp.json` | 在受控 runner 部署後，驗證 `claude mcp list` 只顯示 managed policy 允許項或空集合 |
 | Claude plugin 完全禁用 | 已確認 marketplace 可用 `strictKnownMarketplaces` 管控，但既有 installed plugin 需逐一處理 | 用目標 runner 的 `claude plugin list` 建立 deny/disable 清單，再驗證 init event `plugins=[]` |
 | Codex Windows elevated sandbox | 本機 `0.136.0` default/elevated backend 仍 `spawn setup refresh`；公開 issue 也有同類回報 | 後續版本或完成 `codex sandbox setup --elevated` 後重跑 `:read-only` / `:workspace` / 自訂 deny-read profile smoke test |
