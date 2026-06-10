@@ -1,6 +1,6 @@
 # Claude Code CLI 與 Codex CLI 企業內部承載研究
 
-研究日期：2026-06-01；Claude Code `2.1.162` 升級補測：2026-06-04
+研究日期：2026-06-01；Claude Code `2.1.162` 升級補測：2026-06-04；Docker auth cache 補測：2026-06-05
 工作區：`D:\side_project\agent-study`  
 原則：本文件以本機 CLI 實測為主，官方文件為輔。若本機版本與文件不一致，以本機版本作為直接承載應用時的決策依據。
 
@@ -1001,6 +1001,53 @@ scope 註記：本節 `:read-only` 的 HTTP/80 成功來自 direct `codex sandbo
 | network disabled 是否真的擋住出站 | 否；direct profile 與 `default_permissions=":workspace"` 已見 HTTP/80 raw egress 可通。HTTPS/proxy 路徑失敗不能推論全網封鎖；codebus `-s read-only` 仍待重測 |
 | 企業結論是否修改 | 不升級 Windows native 為可用安全 runner；仍建議 WSL2/Linux runner，或外部 VM/AppContainer/ACL/firewall 作 hard boundary |
 
+### 3.16 Docker auth cache portability 補測（2026-06-05）
+
+補測目的：確認在乾淨 Docker home 內，是否只要放入本機 CLI credential cache 檔，就能讓 CLI 取得原帳號的訂閱登入資格。測試未讀取、列印或保存 credential JSON 內容；只複製到 `/tmp` 暫存 home，測完刪除。
+
+測試環境：
+
+| 項目 | 值 |
+|---|---|
+| Host | Linux `/home/asus/agent-cli-study` |
+| Docker | `Docker version 28.1.1` |
+| Image | `debian:bookworm-slim` |
+| Codex | `codex-cli 0.137.0`，掛載 standalone binary |
+| Claude Code | `2.1.162 (Claude Code)`，掛載 native binary |
+| Home 隔離 | `HOME=/tmp/home`；Codex 設 `CODEX_HOME=/tmp/home/.codex`；Claude 設 `CLAUDE_CONFIG_DIR=/tmp/home/.claude` |
+| Credential 環境變數 | `CODEX_ACCESS_TOKEN`、`CODEX_API_KEY`、`ANTHROPIC_API_KEY`、`ANTHROPIC_AUTH_TOKEN`、`CLAUDE_CODE_OAUTH_TOKEN` 均未設定 |
+
+對照組：空 home。
+
+| 命令 | 結果 |
+|---|---|
+| `codex login status` | `Not logged in`，exit `1` |
+| `claude auth status --text` | `Not logged in. Run claude auth login to authenticate.`，exit `1` |
+
+實驗組：只複製 credential cache 檔，不複製完整 `~/.claude` 或 `~/.codex`。
+
+| 檔案 | 結果 |
+|---|---|
+| `~/.codex/auth.json` -> `/tmp/home/.codex/auth.json` | `codex login status` 顯示 `Logged in using ChatGPT`，exit `0` |
+| `~/.claude/.credentials.json` -> `/tmp/home/.claude/.credentials.json` | `claude auth status --text` 顯示 `Login method: Claude Max account`，exit `0` |
+
+最小推理 smoke test：
+
+| CLI | 命令形態 | 結果 |
+|---|---|---|
+| Claude Code | `claude -p --no-session-persistence --tools "" --permission-mode dontAsk "Do not call tools. Reply exactly: OK"` | 回 `OK`，exit `0` |
+| Codex | `codex exec --skip-git-repo-check --ignore-rules --ephemeral --sandbox read-only -C /tmp/home "Do not call tools. Reply exactly: OK"` | 回 `OK`，exit `0` |
+
+Codex caveat：`debian:bookworm-slim` 初次執行 `codex exec` 時因 base image 沒有 native root CA certificates，WebSocket 連線失敗；將 host `/etc/ssl/certs` 以 read-only 掛入 container 後成功。這是 TLS trust store 問題，不是 auth cache 問題。
+
+判定：
+
+1. 在本機版本下，`~/.codex/auth.json` 足以讓乾淨 Docker 環境使用 ChatGPT 登入狀態執行 Codex。
+2. 在本機版本下，`~/.claude/.credentials.json` 足以讓乾淨 Docker 環境使用 Claude Max account 執行 Claude Code。
+3. 這證明兩個檔案都是高敏感登入憑證，不只是一般設定檔。取得檔案者可在 token 未過期、未撤銷、未被 server policy 阻擋且無 env var 覆蓋時重現訂閱帳號能力。
+4. 企業 runner 不得使用工程師個人 auth cache；應使用 service account、短期 token、secret manager 與可審計的發放/輪替/撤銷流程。
+5. 文件與日誌不得保存 credential JSON、email、workspace id、user id、access token、refresh token 或 cookie 類資料。
+
 ## 4. Claude Code CLI 行為模型
 
 ### 4.1 啟動模式
@@ -1381,16 +1428,17 @@ type AgentRunResult = {
 ### 7.1 通用規則
 
 1. 不用一般使用者 home 作生產執行環境。
-2. 每次任務建立獨立工作目錄。
-3. workspace 不等於資料邊界；workspace 外讀寫必須由 OS/container/managed policy 阻擋。
-4. 預設不允許網路，除非任務需要且目的網域已 allowlist。
-5. 預設不允許 shell，除非外部 runner 隔離。
-6. 預設不允許 MCP，除非企業管理 allowlist。
-7. 預設不讀使用者 hooks/plugins/skills。
-8. 禁止 CLI resume/continue，除非 session 被產品資料模型管理。
-9. wrapper 必須驗證 side effects。
-10. wrapper 必須記錄：版本、完整 argv、cwd、env allowlist、stdout JSON、stderr、exit code、git diff、檔案 hash。
-11. CLI 更新前必須跑 smoke test，不得自動套新版。
+2. 不複製工程師個人的 `~/.claude/.credentials.json` 或 `~/.codex/auth.json` 到 production runner；這些檔案等同高敏感登入憑證。
+3. 每次任務建立獨立工作目錄。
+4. workspace 不等於資料邊界；workspace 外讀寫必須由 OS/container/managed policy 阻擋。
+5. 預設不允許網路，除非任務需要且目的網域已 allowlist。
+6. 預設不允許 shell，除非外部 runner 隔離。
+7. 預設不允許 MCP，除非企業管理 allowlist。
+8. 預設不讀使用者 hooks/plugins/skills。
+9. 禁止 CLI resume/continue，除非 session 被產品資料模型管理。
+10. wrapper 必須驗證 side effects。
+11. wrapper 必須記錄：版本、完整 argv、cwd、env allowlist、stdout JSON、stderr、exit code、git diff、檔案 hash。
+12. CLI 更新前必須跑 smoke test，不得自動套新版。
 
 ### 7.2 Claude locked-down read-only / no-tool 模板
 
@@ -2000,41 +2048,43 @@ codex "do task"
 Claude Code：
 
 1. CLI reference：<https://code.claude.com/docs/en/cli-usage>
-2. Permission modes：<https://code.claude.com/docs/en/permission-modes>
-3. Permissions：<https://code.claude.com/docs/en/permissions>
-4. Settings：<https://code.claude.com/docs/en/settings>
-5. Server-managed settings：<https://code.claude.com/docs/en/server-managed-settings>
-6. Sandboxing：<https://code.claude.com/docs/en/sandboxing>
-7. Environment variables：<https://code.claude.com/docs/en/env-vars>
-8. Managed MCP：<https://code.claude.com/docs/en/managed-mcp>
-9. Hooks：<https://docs.anthropic.com/en/docs/claude-code/hooks>
-10. Memory / `CLAUDE.md`：<https://docs.anthropic.com/en/docs/claude-code/memory>
-11. Skills：<https://code.claude.com/docs/en/skills>
-12. Plugins：<https://code.claude.com/docs/en/plugins>
-13. MCP：<https://code.claude.com/docs/en/mcp>
-14. `.claude` directory / `CLAUDE_CONFIG_DIR`：<https://code.claude.com/docs/en/claude-directory>
-15. Debug configuration：<https://code.claude.com/docs/en/debug-your-config>
-16. Changelog：<https://code.claude.com/docs/en/changelog>
-17. npm package metadata：<https://www.npmjs.com/package/@anthropic-ai/claude-code>
+2. Authentication：<https://code.claude.com/docs/en/authentication>
+3. Permission modes：<https://code.claude.com/docs/en/permission-modes>
+4. Permissions：<https://code.claude.com/docs/en/permissions>
+5. Settings：<https://code.claude.com/docs/en/settings>
+6. Server-managed settings：<https://code.claude.com/docs/en/server-managed-settings>
+7. Sandboxing：<https://code.claude.com/docs/en/sandboxing>
+8. Environment variables：<https://code.claude.com/docs/en/env-vars>
+9. Managed MCP：<https://code.claude.com/docs/en/managed-mcp>
+10. Hooks：<https://docs.anthropic.com/en/docs/claude-code/hooks>
+11. Memory / `CLAUDE.md`：<https://docs.anthropic.com/en/docs/claude-code/memory>
+12. Skills：<https://code.claude.com/docs/en/skills>
+13. Plugins：<https://code.claude.com/docs/en/plugins>
+14. MCP：<https://code.claude.com/docs/en/mcp>
+15. `.claude` directory / `CLAUDE_CONFIG_DIR`：<https://code.claude.com/docs/en/claude-directory>
+16. Debug configuration：<https://code.claude.com/docs/en/debug-your-config>
+17. Changelog：<https://code.claude.com/docs/en/changelog>
+18. npm package metadata：<https://www.npmjs.com/package/@anthropic-ai/claude-code>
 
 Codex：
 
 1. OpenAI Codex non-interactive mode：<https://developers.openai.com/codex/noninteractive>
-2. OpenAI Codex agent approvals & security：<https://developers.openai.com/codex/agent-approvals-security>
-3. OpenAI Codex sandboxing：<https://developers.openai.com/codex/concepts/sandboxing>
-4. OpenAI Codex permissions：<https://developers.openai.com/codex/permissions>
-5. OpenAI Codex managed configuration：<https://developers.openai.com/codex/enterprise/managed-configuration>
-6. OpenAI Codex configuration reference：<https://developers.openai.com/codex/config-reference>
-7. OpenAI Codex environment variables：<https://developers.openai.com/codex/environment-variables>
-8. OpenAI Codex GitHub README：<https://github.com/openai/codex/blob/main/README.md>
-9. Codex config schema：<https://github.com/openai/codex/blob/main/codex-rs/core/config.schema.json>
-10. OpenAI Codex Windows：<https://developers.openai.com/codex/windows>
-11. OpenAI Codex config schema JSON：<https://developers.openai.com/codex/config-schema.json>
-12. OpenAI Codex hooks：<https://developers.openai.com/codex/hooks>
-13. OpenAI Codex plugins：<https://developers.openai.com/codex/plugins>
-14. OpenAI Codex skills：<https://developers.openai.com/codex/skills>
-15. OpenAI Codex MCP：<https://developers.openai.com/codex/mcp>
-16. OpenAI Codex rules：<https://developers.openai.com/codex/rules>
+2. OpenAI Codex authentication：<https://developers.openai.com/codex/auth>
+3. OpenAI Codex agent approvals & security：<https://developers.openai.com/codex/agent-approvals-security>
+4. OpenAI Codex sandboxing：<https://developers.openai.com/codex/concepts/sandboxing>
+5. OpenAI Codex permissions：<https://developers.openai.com/codex/permissions>
+6. OpenAI Codex managed configuration：<https://developers.openai.com/codex/enterprise/managed-configuration>
+7. OpenAI Codex configuration reference：<https://developers.openai.com/codex/config-reference>
+8. OpenAI Codex environment variables：<https://developers.openai.com/codex/environment-variables>
+9. OpenAI Codex GitHub README：<https://github.com/openai/codex/blob/main/README.md>
+10. Codex config schema：<https://github.com/openai/codex/blob/main/codex-rs/core/config.schema.json>
+11. OpenAI Codex Windows：<https://developers.openai.com/codex/windows>
+12. OpenAI Codex config schema JSON：<https://developers.openai.com/codex/config-schema.json>
+13. OpenAI Codex hooks：<https://developers.openai.com/codex/hooks>
+14. OpenAI Codex plugins：<https://developers.openai.com/codex/plugins>
+15. OpenAI Codex skills：<https://developers.openai.com/codex/skills>
+16. OpenAI Codex MCP：<https://developers.openai.com/codex/mcp>
+17. OpenAI Codex rules：<https://developers.openai.com/codex/rules>
 
 ## 16. 本機重跑驗證命令
 
@@ -2592,6 +2642,7 @@ Codex 使用專用 CODEX_HOME + --ignore-user-config + --ignore-rules + --disabl
 | Claude Code user/global 設定會影響 local | 本機 `claude --print --verbose --output-format stream-json --tools=` init event 顯示 LSP、claude.ai MCP auth tools、MCP servers、slash commands、skills、plugins 仍載入 |
 | Claude Code 疊加 `--setting-sources project,local --disable-slash-commands --strict-mcp-config --mcp-config empty --tools=` 可清空 tool/MCP/skill/plugin surface | 本機 init event 顯示 `tools=[]`、`mcp_servers=[]`、`slash_commands=[]`、`skills=[]`、`plugins=[]` |
 | Claude Code `--bare` 不讀 keychain/OAuth，本機 OAuth 登入下會失敗 | 本機 `claude --bare --print` 回報 `Not logged in`；`claude --help` 說明 `--bare` 僅用 `ANTHROPIC_API_KEY` 或 `apiKeyHelper` |
+| Docker 內只放 auth cache 檔即可重現訂閱帳號登入能力 | 2026-06-05 本機 Docker `debian:bookworm-slim`：空 home 下 Codex / Claude 均未登入；只複製 `~/.codex/auth.json` 後 `codex login status` 顯示 `Logged in using ChatGPT`，只複製 `~/.claude/.credentials.json` 後 `claude auth status --text` 顯示 `Login method: Claude Max account`；兩者最小推理均回 `OK` |
 | Codex `--ignore-user-config --ignore-rules` 不足以隔離 plugin/skill loader | 本機 stderr 仍出現 `codex_core_skills::loader` warnings |
 | Codex 加上 feature disable 後 plugin/skill loader warnings 消失 | 本機 `codex exec --disable plugins --disable apps --disable hooks ...` 只剩 PowerShell shell snapshot 診斷 |
 | Codex Windows sandbox 尚未通過本機 smoke test | 本機 `0.135.0` 與 `0.136.0` 的 default/elevated `codex sandbox --permissions-profile ':read-only'` / `':workspace'` 均出現 `windows sandbox failed: spawn setup refresh` |
